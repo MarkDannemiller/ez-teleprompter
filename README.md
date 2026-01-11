@@ -1,16 +1,65 @@
-# React + Vite
+# Teleprompter
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A simple, customizable teleprompter app built with React and Vite. Paste your script, set a target reading time, and the app will scroll through your words at the calculated pace.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Target Time-Based Pacing**: Set how long you want your script to take, and the app calculates the required words-per-minute
+- **Dynamic Word Timing**: Longer words and multi-syllable words get proportionally more time
+- **Punctuation Pauses**: Automatic pauses after periods, commas, and other punctuation
+- **Multi-Speaker Support**: Mark different speakers with `[Speaker]:` syntax
+- **Per-Speaker Customization**: Set unique colors and speaking speeds for each speaker
+- **Smooth Scrolling**: Continuous, synchronized scrolling that keeps the current word centered
+- **Countdown Timer**: 3-2-1 countdown before starting or resuming
+- **Pause/Resume**: Pause anytime and scroll through the script manually
+- **Persistent Settings**: Script, timing, and speaker settings are saved to localStorage
 
-## React Compiler
+## Script Syntax
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```
+[Kevin]:
+Hey, my name is Kevin. I'm the CEO of the company.
 
-## Expanding the ESLint configuration
+[Mark]:
+And I'm Mark, the CTO.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+[Kevin]:
+Together, we're building something great.
+```
+
+- Use `[SpeakerName]:` to mark speaker sections
+- Line breaks within a section are preserved
+- `==highlighted text==` markers are automatically stripped
+- **bold** and *italic* markdown is supported
+
+## Usage
+
+1. Paste your script in the editor
+2. Set your target reading time (minutes and seconds)
+3. Adjust speaker colors and speeds if needed
+4. Click "Start Teleprompter"
+5. Use the controls to pause, resume, restart, or exit
+
+### Keyboard Shortcuts
+
+- **Esc**: Exit back to the editor
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start dev server
+npm run dev
+
+# Build for production
+npm run build
+```
+
+## Tech Stack
+
+- React
+- Vite
+- Radix UI (ScrollArea, Popover)
+- Lucide React (icons)

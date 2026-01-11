@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
+import { Play, Pause, RotateCcw, X } from 'lucide-react'
+import * as ScrollArea from '@radix-ui/react-scroll-area'
+import * as Popover from '@radix-ui/react-popover'
 import './App.css'
 
 // Estimate syllables in a word
@@ -24,11 +27,28 @@ function estimateSyllables(word) {
   return Math.max(1, count)
 }
 
-function getWordWeight(word) {
+function getWordWeight(word, isBeforeLineBreak = false) {
   const cleanWord = word.replace(/[^a-zA-Z]/g, '')
   const syllables = estimateSyllables(cleanWord)
   const lengthFactor = Math.max(1, cleanWord.length / 4)
-  return syllables * 0.7 + lengthFactor * 0.3
+
+  let baseWeight = syllables * 0.7 + lengthFactor * 0.3
+
+  // Add pause for punctuation
+  if (/[.!?]$/.test(word)) {
+    // Sentence-ending punctuation: longer pause
+    baseWeight += 1.5
+  } else if (/[,;:\u2014\u2013]$/.test(word) || word.endsWith('—') || word.endsWith('–')) {
+    // Clause punctuation (comma, semicolon, colon, em-dash): medium pause
+    baseWeight += 0.8
+  }
+
+  // Add pause before line breaks
+  if (isBeforeLineBreak) {
+    baseWeight += 1.0
+  }
+
+  return baseWeight
 }
 
 // Parse markdown formatting from a word
@@ -56,41 +76,47 @@ function parseWordFormatting(word) {
 function parseScript(script) {
   let cleaned = script.replace(/==(.*?)==/g, '$1')
 
+  // Find all speaker markers and their positions
   const speakerRegex = /\[([^\]]+)\]:/g
-  const sections = []
-  let lastIndex = 0
+  const markers = []
   let match
 
   while ((match = speakerRegex.exec(cleaned)) !== null) {
-    if (match.index > lastIndex) {
-      const content = cleaned.slice(lastIndex, match.index).trim()
-      if (content) {
-        sections.push({ speaker: null, content })
-      }
-    }
-    lastIndex = match.index + match[0].length
-
-    const nextMatch = speakerRegex.exec(cleaned)
-    const endIndex = nextMatch ? nextMatch.index : cleaned.length
-    speakerRegex.lastIndex = lastIndex
-
-    const content = cleaned.slice(lastIndex, endIndex).trim()
-    if (content) {
-      sections.push({ speaker: match[1], content })
-    }
-    lastIndex = endIndex
+    markers.push({
+      speaker: match[1],
+      start: match.index,
+      end: match.index + match[0].length
+    })
   }
 
-  if (lastIndex < cleaned.length) {
-    const content = cleaned.slice(lastIndex).trim()
+  const sections = []
+
+  // If no markers, treat whole script as one section
+  if (markers.length === 0) {
+    if (cleaned.trim()) {
+      sections.push({ speaker: null, content: cleaned.trim() })
+    }
+    return sections
+  }
+
+  // Content before first speaker
+  if (markers[0].start > 0) {
+    const content = cleaned.slice(0, markers[0].start).trim()
     if (content) {
       sections.push({ speaker: null, content })
     }
   }
 
-  if (sections.length === 0 && cleaned.trim()) {
-    sections.push({ speaker: null, content: cleaned.trim() })
-  }
+  // Process each speaker section
+  markers.forEach((marker, i) => {
+    const contentStart = marker.end
+    const contentEnd = i < markers.length - 1 ? markers[i + 1].start : cleaned.length
+    const content = cleaned.slice(contentStart, contentEnd).trim()
+
+    if (content) {
+      sections.push({ speaker: marker.speaker, content })
+    }
+  })
 
   return sections
 }
@@ -114,16 +140,51 @@ function parseWords(content) {
   return words
 }
 
+// Load from localStorage
+const loadFromStorage = (key, defaultValue) => {
+  try {
+    const saved = localStorage.getItem(key)
+    return saved !== null ? JSON.parse(saved) : defaultValue
+  } catch {
+    return defaultValue
+  }
+}
+
 function App() {
-  const [script, setScript] = useState('')
-  const [targetMinutes, setTargetMinutes] = useState(1)
-  const [targetSeconds, setTargetSeconds] = useState(0)
+  const [script, setScript] = useState(() => loadFromStorage('teleprompter-script', ''))
+  const [targetMinutes, setTargetMinutes] = useState(() => loadFromStorage('teleprompter-minutes', 1))
+  const [targetSeconds, setTargetSeconds] = useState(() => loadFromStorage('teleprompter-seconds', 0))
+  const [speakerSpeeds, setSpeakerSpeeds] = useState(() => loadFromStorage('teleprompter-speeds', {}))
+  const [speakerColors, setSpeakerColors] = useState(() => loadFromStorage('teleprompter-colors', {}))
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentWordIndex, setCurrentWordIndex] = useState(-1)
   const [showInput, setShowInput] = useState(true)
   const [elapsedTime, setElapsedTime] = useState(0)
   const [countdown, setCountdown] = useState(null)
   const [wordPositions, setWordPositions] = useState([])
+  const [pausedScrollY, setPausedScrollY] = useState(0)
+  const countdownTimeoutsRef = useRef([])
+
+  // Save to localStorage when values change
+  useEffect(() => {
+    localStorage.setItem('teleprompter-script', JSON.stringify(script))
+  }, [script])
+
+  useEffect(() => {
+    localStorage.setItem('teleprompter-minutes', JSON.stringify(targetMinutes))
+  }, [targetMinutes])
+
+  useEffect(() => {
+    localStorage.setItem('teleprompter-seconds', JSON.stringify(targetSeconds))
+  }, [targetSeconds])
+
+  useEffect(() => {
+    localStorage.setItem('teleprompter-speeds', JSON.stringify(speakerSpeeds))
+  }, [speakerSpeeds])
+
+  useEffect(() => {
+    localStorage.setItem('teleprompter-colors', JSON.stringify(speakerColors))
+  }, [speakerColors])
 
   // Parse script into sections and flatten words
   const { sections, allWords, sectionBoundaries } = useMemo(() => {
@@ -147,17 +208,78 @@ function App() {
     return { sections, allWords, sectionBoundaries }
   }, [script])
 
+  // Extract unique speakers
+  const speakers = useMemo(() => {
+    const uniqueSpeakers = []
+    sectionBoundaries.forEach(s => {
+      if (s.speaker && !uniqueSpeakers.includes(s.speaker)) {
+        uniqueSpeakers.push(s.speaker)
+      }
+    })
+    return uniqueSpeakers
+  }, [sectionBoundaries])
+
+  // Get speed modifier for a speaker (higher = faster = less time per word)
+  const getSpeakerSpeed = (speaker) => {
+    return speakerSpeeds[speaker] || 1.0
+  }
+
+  const updateSpeakerSpeed = (speaker, speed) => {
+    setSpeakerSpeeds(prev => ({
+      ...prev,
+      [speaker]: speed
+    }))
+  }
+
+  // Predefined color palette for speakers
+  const colorPalette = [
+    '#646cff', // Blue
+    '#ff6b6b', // Red
+    '#4ecdc4', // Teal
+    '#ffe66d', // Yellow
+    '#a855f7', // Purple
+    '#f97316', // Orange
+    '#22c55e', // Green
+    '#ec4899', // Pink
+    '#06b6d4', // Cyan
+    '#eab308', // Amber
+  ]
+
+  const getSpeakerColor = (speaker) => {
+    if (speakerColors[speaker]) return speakerColors[speaker]
+    // Assign a default color based on speaker index
+    const idx = speakers.indexOf(speaker)
+    return colorPalette[idx % colorPalette.length]
+  }
+
+  const updateSpeakerColor = (speaker, color) => {
+    setSpeakerColors(prev => ({
+      ...prev,
+      [speaker]: color
+    }))
+  }
+
   const totalWords = allWords.length
   const targetTimeMs = (targetMinutes * 60 + targetSeconds) * 1000
 
-  // Calculate timing for each word
+  // Calculate timing for each word (accounting for speaker speeds)
   const wordTimings = useMemo(() => {
-    const weights = allWords.map(w => getWordWeight(w.text))
+    const weights = allWords.map((w, i) => {
+      // Check if next word starts a new line
+      const isBeforeLineBreak = i < allWords.length - 1 && allWords[i + 1].isLineStart
+      let weight = getWordWeight(w.text, isBeforeLineBreak)
+
+      // Apply speaker speed modifier (higher speed = less time = divide weight)
+      const speed = getSpeakerSpeed(w.speaker)
+      weight = weight / speed
+
+      return weight
+    })
     const totalWeight = weights.reduce((sum, w) => sum + w, 0)
     return weights.map(weight =>
       totalWeight > 0 ? (weight / totalWeight) * targetTimeMs : 0
     )
-  }, [allWords, targetTimeMs])
+  }, [allWords, targetTimeMs, speakerSpeeds])
 
   // Calculate cumulative start time for each word
   const wordStartTimes = useMemo(() => {
@@ -178,6 +300,7 @@ function App() {
   const startTimeRef = useRef(null)
   const wordDisplayRef = useRef(null)
   const scrollContentRef = useRef(null)
+  const pausedViewportRef = useRef(null)
 
   // Measure word positions after render
   const measureWordPositions = () => {
@@ -245,23 +368,20 @@ function App() {
     const elapsed = Date.now() - startTimeRef.current
     const positions = wordPositions
 
-    // Update elapsed time display
+    // Update elapsed time display (always keep running)
     setElapsedTime(elapsed)
 
-    // Determine current word from elapsed time
-    const wordIdx = getWordIndexAtTime(elapsed)
+    // Determine current word from elapsed time (cap at last word)
+    const wordIdx = Math.min(getWordIndexAtTime(elapsed), allWords.length - 1)
     setCurrentWordIndex(wordIdx)
 
-    // Calculate and apply scroll position
-    const scrollY = getScrollPositionAtTime(elapsed, positions)
+    // Calculate and apply scroll position (cap at final position)
+    const cappedElapsed = Math.min(elapsed, targetTimeMs)
+    const scrollY = getScrollPositionAtTime(cappedElapsed, positions)
     scrollContentRef.current.style.transform = `translateY(${-scrollY}px)`
 
-    // Continue animation if not finished
-    if (elapsed < targetTimeMs && wordIdx < allWords.length - 1) {
-      animationRef.current = requestAnimationFrame(runAnimation)
-    } else {
-      setIsPlaying(false)
-    }
+    // Keep animation running to show elapsed time
+    animationRef.current = requestAnimationFrame(runAnimation)
   }
 
   const stopAnimation = () => {
@@ -307,25 +427,110 @@ function App() {
     }, 3000)
   }
 
+  const cancelCountdown = () => {
+    countdownTimeoutsRef.current.forEach(id => clearTimeout(id))
+    countdownTimeoutsRef.current = []
+    setCountdown(null)
+  }
+
   const handlePause = () => {
+    // Cancel any ongoing countdown
+    cancelCountdown()
+
+    // Save current scroll position before pausing
+    if (scrollContentRef.current) {
+      const transform = scrollContentRef.current.style.transform
+      const match = transform.match(/translateY\((-?\d+(?:\.\d+)?)px\)/)
+      if (match) {
+        setPausedScrollY(Math.abs(parseFloat(match[1])))
+      }
+    }
     setIsPlaying(false)
     stopAnimation()
   }
 
   const handleResume = () => {
-    if (currentWordIndex >= 0 && currentWordIndex < allWords.length - 1) {
-      // Adjust start time to account for elapsed time
-      startTimeRef.current = Date.now() - elapsedTime
-      setIsPlaying(true)
+    if (currentWordIndex >= 0) {
+      // Clear any existing timeouts
+      cancelCountdown()
+
+      // Show countdown before resuming
+      setCountdown(3)
+
+      // After state updates and DOM re-renders, set the scroll position
+      const scrollTimeout = setTimeout(() => {
+        if (scrollContentRef.current) {
+          scrollContentRef.current.style.transform = `translateY(${-pausedScrollY}px)`
+        }
+      }, 50)
+
+      const t1 = setTimeout(() => setCountdown(2), 1000)
+      const t2 = setTimeout(() => setCountdown(1), 2000)
+      const t3 = setTimeout(() => {
+        setCountdown(null)
+
+        // Adjust start time to account for elapsed time
+        startTimeRef.current = Date.now() - elapsedTime
+
+        // Re-measure positions and snap back to correct scroll position
+        requestAnimationFrame(() => {
+          const positions = measureWordPositions()
+          setWordPositions(positions)
+
+          // Reset scroll position based on elapsed time
+          if (scrollContentRef.current && positions.length > 0) {
+            const scrollY = getScrollPositionAtTime(elapsedTime, positions)
+            scrollContentRef.current.style.transform = `translateY(${-scrollY}px)`
+          }
+
+          setIsPlaying(true)
+        })
+      }, 3000)
+
+      countdownTimeoutsRef.current = [scrollTimeout, t1, t2, t3]
     }
   }
 
-  const handleReset = () => {
+  const handleRestart = () => {
+    // Clear any existing timeouts
+    cancelCountdown()
+    stopAnimation()
+    setIsPlaying(false)
+    setCurrentWordIndex(0)
+    setElapsedTime(0)
+    setPausedScrollY(0)
+
+    if (scrollContentRef.current) {
+      scrollContentRef.current.style.transform = 'translateY(0)'
+    }
+
+    // Show countdown before restarting
+    setCountdown(3)
+
+    const t1 = setTimeout(() => setCountdown(2), 1000)
+    const t2 = setTimeout(() => setCountdown(1), 2000)
+    const t3 = setTimeout(() => {
+      setCountdown(null)
+      startTimeRef.current = Date.now()
+
+      // Re-measure and start
+      requestAnimationFrame(() => {
+        const positions = measureWordPositions()
+        setWordPositions(positions)
+        setIsPlaying(true)
+      })
+    }, 3000)
+
+    countdownTimeoutsRef.current = [t1, t2, t3]
+  }
+
+  const handleExit = () => {
     setIsPlaying(false)
     setCurrentWordIndex(-1)
     setElapsedTime(0)
     setShowInput(true)
     setWordPositions([])
+    setPausedScrollY(0)
     stopAnimation()
     startTimeRef.current = null
 
@@ -334,6 +539,18 @@ function App() {
     }
   }
 
+  // Esc key to go back to input
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !showInput) {
+        handleExit()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showInput])
+
   const formatTime = (ms) => {
     const totalSeconds = Math.floor(ms / 1000)
     const minutes = Math.floor(totalSeconds / 60)
@@ -341,18 +558,18 @@ function App() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`
   }
 
-  const isFinished = currentWordIndex >= allWords.length - 1
-
   // Render words grouped by section
   const renderWords = () => {
     const elements = []
 
     sectionBoundaries.forEach((section, sectionIdx) => {
+      const speakerColor = section.speaker ? getSpeakerColor(section.speaker) : '#646cff'
+
       // Add speaker divider
       if (sectionIdx > 0 && section.speaker) {
         elements.push(
           <div key={`divider-${sectionIdx}`} className="speaker-divider">
-            <span className="speaker-name">{section.speaker}</span>
+            <span className="speaker-name" style={{ color: speakerColor }}>{section.speaker}</span>
           </div>
         )
       }
@@ -360,7 +577,7 @@ function App() {
       if (sectionIdx === 0 && section.speaker) {
         elements.push(
           <div key={`speaker-${sectionIdx}`} className="speaker-divider first">
-            <span className="speaker-name">{section.speaker}</span>
+            <span className="speaker-name" style={{ color: speakerColor }}>{section.speaker}</span>
           </div>
         )
       }
@@ -370,6 +587,8 @@ function App() {
         const word = allWords[i]
         const isCurrent = i === currentWordIndex
         const isPast = i < currentWordIndex
+
+        const wordStyle = isCurrent ? { backgroundColor: speakerColor } : {}
 
         sectionWords.push(
           <span key={i}>
@@ -381,6 +600,7 @@ function App() {
                 isPast ? 'past' :
                 'future'
               } ${word.bold ? 'bold' : ''} ${word.italic ? 'italic' : ''}`}
+              style={wordStyle}
             >
               {word.text}
             </span>
@@ -403,15 +623,125 @@ function App() {
     <div className="app">
       {showInput ? (
         <div className="input-container">
-          <h1>Teleprompter</h1>
+          <div className="sidebar">
+            <ScrollArea.Root className="scroll-area-root sidebar-scroll">
+              <ScrollArea.Viewport className="scroll-area-viewport">
+                <div className="sidebar-content">
+                  <h1>Teleprompter</h1>
 
-          <div className="script-section">
-            <label htmlFor="script">Paste your script:</label>
-            <textarea
-              id="script"
-              value={script}
-              onChange={(e) => setScript(e.target.value)}
-              placeholder={`Enter your script here...
+                  <div className="stats">
+                    <span>Words: {totalWords}</span>
+                  </div>
+
+                  <div className="time-section">
+                    <label>Target reading time:</label>
+                    <div className="time-inputs">
+                      <div className="time-input-group">
+                        <input
+                          type="number"
+                          min="0"
+                          max="60"
+                          value={targetMinutes}
+                          onChange={(e) => setTargetMinutes(Math.max(0, parseInt(e.target.value) || 0))}
+                        />
+                        <span>min</span>
+                      </div>
+                      <div className="time-input-group">
+                        <input
+                          type="number"
+                          min="0"
+                          max="59"
+                          value={targetSeconds}
+                          onChange={(e) => setTargetSeconds(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                        />
+                        <span>sec</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {totalWords > 0 && targetTimeMs > 0 && (
+                    <div className="calculated-wpm">
+                      Calculated pace: <strong>{averageWPM} WPM</strong>
+                    </div>
+                  )}
+
+                  {speakers.length > 0 && (
+                    <div className="speaker-settings">
+                      <label>Speakers:</label>
+                      <div className="speaker-controls">
+                        {speakers.map(speaker => (
+                          <div key={speaker} className="speaker-control">
+                            <div className="speaker-control-header">
+                              <Popover.Root>
+                                <Popover.Trigger asChild>
+                                  <button
+                                    className="color-trigger"
+                                    style={{ backgroundColor: getSpeakerColor(speaker) }}
+                                    title="Choose color"
+                                  />
+                                </Popover.Trigger>
+                                <Popover.Portal>
+                                  <Popover.Content className="color-popover" sideOffset={5}>
+                                    <div className="color-swatches">
+                                      {colorPalette.map(color => (
+                                        <Popover.Close asChild key={color}>
+                                          <button
+                                            className={`color-swatch ${getSpeakerColor(speaker) === color ? 'selected' : ''}`}
+                                            style={{ backgroundColor: color }}
+                                            onClick={() => updateSpeakerColor(speaker, color)}
+                                          />
+                                        </Popover.Close>
+                                      ))}
+                                    </div>
+                                    <Popover.Arrow className="color-popover-arrow" />
+                                  </Popover.Content>
+                                </Popover.Portal>
+                              </Popover.Root>
+                              <span className="speed-speaker-name" style={{ color: getSpeakerColor(speaker) }}>
+                                {speaker}
+                              </span>
+                            </div>
+                            <div className="speaker-control-slider">
+                              <span className="speed-label">Speed</span>
+                              <input
+                                type="range"
+                                min="0.5"
+                                max="1.5"
+                                step="0.01"
+                                value={getSpeakerSpeed(speaker)}
+                                onChange={(e) => updateSpeakerSpeed(speaker, parseFloat(e.target.value))}
+                              />
+                              <span className="speed-value">{getSpeakerSpeed(speaker).toFixed(2)}x</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    className="start-button"
+                    onClick={handleStart}
+                    disabled={totalWords === 0}
+                  >
+                    Start Teleprompter
+                  </button>
+                </div>
+              </ScrollArea.Viewport>
+              <ScrollArea.Scrollbar className="scroll-area-scrollbar" orientation="vertical">
+                <ScrollArea.Thumb className="scroll-area-thumb" />
+              </ScrollArea.Scrollbar>
+            </ScrollArea.Root>
+          </div>
+
+          <div className="editor-panel">
+            <ScrollArea.Root className="scroll-area-root">
+              <ScrollArea.Viewport className="scroll-area-viewport">
+                <textarea
+                  id="script"
+                  value={script}
+                  onChange={(e) => setScript(e.target.value)}
+                  placeholder={`Enter your script here...
 
 Use [Speaker]: to mark speaker sections, e.g.:
 
@@ -420,56 +750,13 @@ Hey, my name is Kevin...
 
 [Mark]:
 And I'm Mark...`}
-              rows={12}
-            />
-          </div>
-
-          <div className="stats">
-            <span>Words: {totalWords}</span>
-            {sectionBoundaries.length > 1 && (
-              <span>Speakers: {sectionBoundaries.filter(s => s.speaker).map(s => s.speaker).join(', ')}</span>
-            )}
-          </div>
-
-          <div className="time-section">
-            <label>Target reading time:</label>
-            <div className="time-inputs">
-              <div className="time-input-group">
-                <input
-                  type="number"
-                  min="0"
-                  max="60"
-                  value={targetMinutes}
-                  onChange={(e) => setTargetMinutes(Math.max(0, parseInt(e.target.value) || 0))}
                 />
-                <span>min</span>
-              </div>
-              <div className="time-input-group">
-                <input
-                  type="number"
-                  min="0"
-                  max="59"
-                  value={targetSeconds}
-                  onChange={(e) => setTargetSeconds(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
-                />
-                <span>sec</span>
-              </div>
-            </div>
+              </ScrollArea.Viewport>
+              <ScrollArea.Scrollbar className="scroll-area-scrollbar" orientation="vertical">
+                <ScrollArea.Thumb className="scroll-area-thumb" />
+              </ScrollArea.Scrollbar>
+            </ScrollArea.Root>
           </div>
-
-          {totalWords > 0 && targetTimeMs > 0 && (
-            <div className="calculated-wpm">
-              Calculated pace: <strong>{averageWPM} WPM</strong>
-            </div>
-          )}
-
-          <button
-            className="start-button"
-            onClick={handleStart}
-            disabled={totalWords === 0}
-          >
-            Start Teleprompter
-          </button>
         </div>
       ) : (
         <div className="teleprompter-container">
@@ -483,22 +770,52 @@ And I'm Mark...`}
             <span className="progress">{Math.max(0, currentWordIndex + 1)}/{totalWords}</span>
             <span className="wpm-display">{averageWPM} WPM</span>
             <div className="controls">
-              {isPlaying ? (
-                <button onClick={handlePause}>Pause</button>
+              {isPlaying || countdown !== null ? (
+                <button onClick={handlePause} title="Pause">
+                  <Pause size={16} />
+                </button>
               ) : (
-                <button onClick={handleResume} disabled={isFinished}>
-                  {isFinished ? 'Done' : 'Resume'}
+                <button onClick={handleResume} title="Resume">
+                  <Play size={16} />
                 </button>
               )}
-              <button onClick={handleReset}>Reset</button>
+              <button onClick={handleRestart} title="Restart">
+                <RotateCcw size={16} />
+              </button>
+              <button onClick={handleExit} className="exit-btn" title="Exit (Esc)">
+                <X size={16} />
+              </button>
             </div>
           </div>
 
-          <div className="word-display" ref={wordDisplayRef}>
-            <div className="scroll-content" ref={scrollContentRef}>
-              {renderWords()}
+          {isPlaying || countdown !== null ? (
+            <div className="word-display playing" ref={wordDisplayRef}>
+              <div className="scroll-content" ref={scrollContentRef}>
+                {renderWords()}
+              </div>
             </div>
-          </div>
+          ) : (
+            <ScrollArea.Root className="scroll-area-root word-display-scroll">
+              <ScrollArea.Viewport
+                className="scroll-area-viewport word-display paused"
+                ref={(el) => {
+                  wordDisplayRef.current = el
+                  pausedViewportRef.current = el
+                  // Scroll to saved position when viewport mounts
+                  if (el && pausedScrollY > 0) {
+                    el.scrollTop = pausedScrollY
+                  }
+                }}
+              >
+                <div className="scroll-content" ref={scrollContentRef}>
+                  {renderWords()}
+                </div>
+              </ScrollArea.Viewport>
+              <ScrollArea.Scrollbar className="scroll-area-scrollbar" orientation="vertical">
+                <ScrollArea.Thumb className="scroll-area-thumb" />
+              </ScrollArea.Scrollbar>
+            </ScrollArea.Root>
+          )}
         </div>
       )}
     </div>
